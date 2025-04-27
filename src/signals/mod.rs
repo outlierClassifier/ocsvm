@@ -59,9 +59,9 @@ impl FeatureType {
     }
 }
 
-pub struct SignalFeatures {
-    pub type_: FeatureType,
-    pub values: Vec<f64>,
+struct SignalFeatures {
+    type_: FeatureType,
+    values: Vec<f64>,
 }
 
 impl std::fmt::Debug for Signal {

@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use signals::get_dataset;
 use std::time::Instant;
 use uuid::Uuid;
+use std::sync::{Arc, RwLock};
 
 use linfa::prelude::*;
 use linfa_svm::Svm;
@@ -17,6 +18,10 @@ use crate::signals::SignalType;
 
 // Startup time for uptime calculation
 static mut START_TIME: Option<Instant> = None;
+
+struct AppState {
+    model: RwLock<Option<Svm<f64, bool>>>,
+}
 
 // Data structures based on API schema
 
@@ -35,7 +40,7 @@ struct Signal {
 struct Discharge {
     id: String,
     #[serde(default)]
-    times: Vec<f64>,
+    _times: Vec<f64>,
     #[serde(default)]
     _length: usize,
     #[serde(default, rename = "anomalyTime")]
@@ -194,7 +199,7 @@ fn process_prediction_request(_request: &PredictionRequest) -> PredictionRespons
 }
 
 /// Procesa una petición de entrenamiento
-fn process_training_request(request: &TrainingRequest) -> TrainingResponse {
+fn process_training_request(request: &TrainingRequest) -> (TrainingResponse, Svm<f64, bool>) {
     // Convertir todas las descargas y señales al formato interno
     let start_time = Instant::now();
 
@@ -235,7 +240,7 @@ fn process_training_request(request: &TrainingRequest) -> TrainingResponse {
         execution_time_ms
     );
 
-    TrainingResponse {
+    let response = TrainingResponse {
         status: "success".to_string(),
         message: "Entrenamiento completado con éxito".to_string(),
         training_id: format!("train_{}", Uuid::new_v4()),
@@ -245,7 +250,9 @@ fn process_training_request(request: &TrainingRequest) -> TrainingResponse {
             f1_score: 0.94,
         },
         execution_time_ms,
-    }
+    };
+
+    (response, model)
 }
 
 // API endpoints
@@ -257,8 +264,12 @@ async fn predict(req: web::Json<PredictionRequest>) -> impl Responder {
 }
 
 #[post("/train")]
-async fn train(req: web::Json<TrainingRequest>) -> impl Responder {
-    let response = process_training_request(&req);
+async fn train(req: web::Json<TrainingRequest>, app_state: web::Data<AppState>) -> impl Responder {
+    let (response, model) = process_training_request(&req);
+
+    let mut model_lock = app_state.model.write().unwrap();
+    *model_lock = Some(model);
+
     HttpResponse::Ok().json(response)
 }
 
@@ -301,11 +312,16 @@ async fn main() -> std::io::Result<()> {
         START_TIME = Some(Instant::now());
     }
 
+    let app_state = web::Data::new(AppState {
+        model: RwLock::new(None),
+    });
+
     log::info!("Starting SVM model server on http://0.0.0.0:8001");
 
     // Start the HTTP server
-    HttpServer::new(|| {
+    HttpServer::new(move || {
         App::new()
+            .app_data(app_state.clone())
             .service(predict)
             .service(train)
             .service(health_check)

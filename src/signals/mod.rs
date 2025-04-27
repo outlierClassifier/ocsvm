@@ -62,8 +62,6 @@ impl FeatureType {
 pub struct SignalFeatures {
     pub type_: FeatureType,
     pub values: Vec<f64>,
-    signal_type: SignalType,
-    disruption_class: DisruptionClass,
 }
 
 impl std::fmt::Debug for Signal {
@@ -211,14 +209,10 @@ impl Signal {
             SignalFeatures {
                 type_: FeatureType::Mean,
                 values: mean_values,
-                signal_type: self.signal_type.clone(),
-                disruption_class: self.class.clone(),
             },
             SignalFeatures {
                 type_: FeatureType::FftStd,
                 values: fft_std_values,
-                signal_type: self.signal_type.clone(),
-                disruption_class: self.class.clone(),
             },
         )
     }

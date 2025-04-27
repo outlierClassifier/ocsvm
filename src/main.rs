@@ -1,14 +1,19 @@
-mod sets;
 mod signals;
 
 use actix_web::{get, post, web, App, HttpResponse, HttpServer, Responder};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use signals::get_dataset;
 use std::time::Instant;
 use uuid::Uuid;
 
+use linfa::prelude::*;
+use linfa_svm::Svm;
+
 use crate::signals::Signal as InternalSignal;
-use crate::sets::{Set, SetCollection};
+use crate::signals::Discharge as InternalDischarge;
+use crate::signals::DisruptionClass;
+use crate::signals::SignalType;
 
 // Startup time for uptime calculation
 static mut START_TIME: Option<Instant> = None;
@@ -107,18 +112,55 @@ struct HealthCheckResponse {
 }
 
 // Adaptadores para convertir entre modelos de API y estructuras internas
+fn get_discharge_type_from_file_name(file_name: &str) -> Result<SignalType, String> {
+    // File name pattern: "DES_<discharge_id>_<signal_type>_r2_sliding.txt"
 
-/// Convierte un objeto Signal de la API a la estructura InternalSignal
-fn api_signal_to_internal(api_signal: &Signal, discharge_id: &str) -> InternalSignal {        
-    InternalSignal::new(api_signal.file_name.clone(), api_signal.values.clone())
+    let parts: Vec<&str> = file_name.split('_').collect();
+    if parts.len() < 3 {
+        return Err(format!("Invalid file name format: {}", file_name));
+    }
+    let signal_type_int = parts[2].parse::<i32>().map_err(|_| format!("Invalid signal type in file name: {}", file_name))?;
+
+    let signal_type = match signal_type_int {
+        1 => SignalType::CorrientePlasma,
+        2 => SignalType::ModeLock,
+        3 => SignalType::Inductancia,
+        4 => SignalType::Densidad,
+        5 => SignalType::DerivadaEnergiaDiamagnetica,
+        6 => SignalType::PotenciaRadiada,
+        7 => SignalType::PotenciaDeEntrada,
+        _ => return Err(format!("Unknown signal type: {}", signal_type_int)),
+    };
+
+    println!("Detected file name: {} with signal type: {:?}", file_name, signal_type);
+
+    Ok(signal_type)
 }
 
-/// Convierte una descarga completa de la API a un vector de señales internas
+/// Convierte un objeto Signal de la API a la estructura InternalSignal
+fn api_signal_to_internal(api_signal: &Signal, signal_class: DisruptionClass) -> Result<InternalSignal, String> {        
+    // Obtener el tipo de señal a partir del nombre del archivo
+    let signal_type = get_discharge_type_from_file_name(&api_signal.file_name)?;
+    Ok(InternalSignal::new(api_signal.file_name.clone(), api_signal.values.clone(), signal_class, signal_type))
+}
+
+/// Convierte una descarga completa de la API a un vector de señales internas. Descarta los ficheros con errores.
 fn api_discharge_to_internal_signals(discharge: &Discharge) -> Vec<InternalSignal> {
+    let signal_class = match discharge.anomaly_time {
+        Some(_) => DisruptionClass::Anomaly,
+        None => DisruptionClass::Normal,
+    };
     discharge
         .signals
         .iter()
-        .map(|signal| api_signal_to_internal(signal, &discharge.id))
+        .map(|signal| api_signal_to_internal(signal, signal_class.clone()))
+        .filter_map(|result| match result {
+            Ok(signal) => Some(signal),
+            Err(err) => {
+                log::error!("Error converting signal: {}. Skipping this signal", err);
+                None
+            }
+        })
         .collect()
 }
 
@@ -143,38 +185,42 @@ fn process_training_request(request: &TrainingRequest) -> TrainingResponse {
     // Convertir todas las descargas y señales al formato interno
     let start_time = Instant::now();
     
-    // Transformar todas las descargas en señales internas
-    let all_signals: Vec<InternalSignal> = request
+    let discharges = request
         .discharges
         .iter()
-        .flat_map(api_discharge_to_internal_signals)
-        .collect();
-    
+        .map(|d| InternalDischarge::new(d.id.clone(), match d.anomaly_time {
+            Some(_) => DisruptionClass::Anomaly,
+            None => DisruptionClass::Normal,
+        }, api_discharge_to_internal_signals(d)))
+        .collect::<Vec<_>>();
+
+    let mut all_signals = Vec::new();
+    for discharge in &discharges {
+        all_signals.extend(discharge.signals.clone());
+    }
+
     log::info!("Procesando {} señales para entrenamiento", all_signals.len());
     
     // Normalizar las señales
     let normalized_signals = InternalSignal::normalize_vec(all_signals);
     
-    // Extraer características de cada señal
-    const WINDOW_SIZE: usize = 16;
+
+    // Clasificación por ventana y fusión de predicciones
+    // Entrenar el SVM de Linfa para clasificar cada ventana individualmente.
+    // Para cada descarga se obtienen 200–700 predicciones binarias. Se determina la etiqueta final por mayoría de votos, proporción umbral o promedio de probabilidades 
+    // Construye un Dataset con todas las ventanas de todas las descargas:
+    // records: Array2<f64> de forma (Σ n_ventanas, 14).
+    // targets: Array1<usize> paralelo con la etiqueta de la descarga para cada ventana. (0 para no disruptiva, 1 para disructiva).
+
+    let dataset = get_dataset(discharges);
     
-    let mut feature_sets = SetCollection::new();
-    
-    for signal in &normalized_signals {
-        // Extraer características de la señal
-        let (mean_features, fft_features) = signal.get_features(WINDOW_SIZE);
-        
-        // Crear conjuntos a partir de las características
-        let mean_set = Set::from(&mean_features);
-        let fft_set = Set::from(&fft_features);
-        
-        // Añadir los conjuntos al colector
-        feature_sets.add_set(mean_set);
-        feature_sets.add_set(fft_set);
-    }
-    
-    // TODO: Entrenar el modelo SVM con los conjuntos de características
-    
+    let model = Svm::<f64, bool>::params()
+        .gaussian_kernel(10.)
+        .pos_neg_weights(1.0, 1.0)
+        .eps(1e-3)
+        .fit(&dataset)
+        .expect("Error al entrenar el modelo SVM");
+
     let execution_time_ms = start_time.elapsed().as_millis() as f64;
     
     TrainingResponse {

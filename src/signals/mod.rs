@@ -1,13 +1,50 @@
+use std::{collections::HashMap, hash::Hash};
+
+use linfa::Dataset;
+use ndarray::{Array1, Array2, Ix1};
 use rustfft::{num_complex::Complex, FftPlanner};
 use serde::Deserialize;
+
+const WINDOW_SIZE: usize = 16;
+
+pub struct Discharge {
+    pub id: String,
+    pub class: DisruptionClass,
+    pub signals: Vec<Signal>,
+}
 
 #[derive(Deserialize, Clone)]
 pub struct Signal {
     pub label: String,
     pub _times: Vec<f64>,
     pub values: Vec<f64>,
+    pub class: DisruptionClass,
+    pub signal_type: SignalType,
     min: f64,
     max: f64,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub enum DisruptionClass {
+    Normal = 0,
+    Anomaly = 1,
+}
+
+#[derive(Debug, Clone, Deserialize, Eq, Hash, PartialEq)]
+pub enum SignalType {
+    CorrientePlasma,
+    ModeLock,
+    Inductancia,
+    Densidad,
+    DerivadaEnergiaDiamagnetica,
+    PotenciaRadiada,
+    PotenciaDeEntrada,
+}
+
+impl SignalType {
+    pub fn count() -> usize {
+        7
+    }
 }
 
 #[derive(Debug)]
@@ -16,9 +53,17 @@ pub enum FeatureType {
     FftStd,
 }
 
+impl FeatureType {
+    pub fn count() -> usize {
+        2
+    }
+}
+
 pub struct SignalFeatures {
     pub type_: FeatureType,
     pub values: Vec<f64>,
+    signal_type: SignalType,
+    disruption_class: DisruptionClass,
 }
 
 impl std::fmt::Debug for Signal {
@@ -45,60 +90,15 @@ impl std::fmt::Debug for SignalFeatures {
 }
 
 impl Signal {
-    pub fn new(label: String, values: Vec<f64>) -> Signal {
+    pub fn new(label: String, values: Vec<f64>, class: DisruptionClass, signal_type: SignalType) -> Signal {
         let min = values.iter().fold(f64::MAX, |a, b| a.min(*b));
         let max = values.iter().fold(f64::MIN, |a, b| a.max(*b));
         Signal {
             label,
             _times: Vec::new(),
             values,
-            min,
-            max,
-        }
-    }
-
-    /// Crea señales a partir de archivos que coincidan con un patrón.
-    /// Devuelve un vector con las señales leídas.
-    pub fn _from_file_pattern(file_pattern: &str) -> Vec<Signal> {
-        let mut signals = Vec::new();
-        let paths = glob::glob(file_pattern).expect("Error reading file pattern");
-        for path in paths {
-            let path = path.unwrap();
-            let file_path = path.to_str().unwrap();
-            let signal = Signal::_from_file(file_path);
-            signals.push(signal);
-        }
-        signals
-    }
-
-    /// Crea una señal a partir de un archivo.
-    pub fn _from_file(file_path: &str) -> Signal {
-        let mut times = Vec::new();
-        let mut values = Vec::new();
-        let mut min = f64::MAX;
-        let mut max = f64::MIN;
-
-        let file = std::fs::read_to_string(file_path).expect("Error reading file");
-        for line in file.lines() {
-            let parts: Vec<&str> = line.trim().split(" ").filter(|s| !s.is_empty()).collect();
-
-            let time = parts[0].parse::<f64>().unwrap();
-            let value = parts[1].parse::<f64>().unwrap();
-
-            times.push(time);
-            values.push(value);
-            if value < min {
-                min = value;
-            }
-            if value > max {
-                max = value;
-            }
-        }
-
-        Signal {
-            label: file_path.to_string(),
-            _times: times,
-            values,
+            class,
+            signal_type,
             min,
             max,
         }
@@ -114,31 +114,42 @@ impl Signal {
 
     /// Recibe un vector de señales y las normaliza, según la fórmula:
     /// \[ x_{norm} = \frac{x - x_{min}}{x_{max} - x_{min}} \]
-    /// donde \( x_{min} \) y \( x_{max} \) son los valores mínimo y máximo de todas las señales.
+    /// donde \( x_{min} \) y \( x_{max} \) son los valores mínimo y máximo de todas las señales del mismo tipo.
     /// Devuelve un vector con las señales normalizadas.
     pub fn normalize_vec(signals: Vec<Signal>) -> Vec<Signal> {
         let mut signals_norm = Vec::new();
-        let global_min = signals
-            .iter()
-            .map(|s| s.min)
-            .fold(f64::MAX, |a, b| a.min(b));
-        let global_max = signals
-            .iter()
-            .map(|s| s.max)
-            .fold(f64::MIN, |a, b| a.max(b));
+
+        let mut min_by_type: HashMap<SignalType, f64> = HashMap::new();
+        let mut max_by_type: HashMap<SignalType, f64> = HashMap::new();
+
+        for signal in &signals {
+            let min_entry = min_by_type.entry(signal.signal_type.clone()).or_insert(f64::MAX);
+            *min_entry = min_entry.min(signal.min);
+            
+            let max_entry = max_by_type.entry(signal.signal_type.clone()).or_insert(f64::MIN);
+            *max_entry = max_entry.max(signal.max);
+        }
+
 
         for signal in signals {
+            let global_min = min_by_type.get(&signal.signal_type).unwrap();
+            let global_max = max_by_type.get(&signal.signal_type).unwrap();
+            
             let mut values_norm = Vec::new();
             for value in signal.values {
                 let value_norm = (value - global_min) / (global_max - global_min);
                 values_norm.push(value_norm);
             }
+            
             let local_min = values_norm.iter().fold(f64::MAX, |a, b| a.min(*b));
             let local_max = values_norm.iter().fold(f64::MIN, |a, b| a.max(*b));
+            
             signals_norm.push(Signal {
                 label: signal.label,
                 _times: signal._times,
                 values: values_norm,
+                class: signal.class,
+                signal_type: signal.signal_type,
                 min: local_min,
                 max: local_max,
             });
@@ -200,10 +211,14 @@ impl Signal {
             SignalFeatures {
                 type_: FeatureType::Mean,
                 values: mean_values,
+                signal_type: self.signal_type.clone(),
+                disruption_class: self.class.clone(),
             },
             SignalFeatures {
                 type_: FeatureType::FftStd,
                 values: fft_std_values,
+                signal_type: self.signal_type.clone(),
+                disruption_class: self.class.clone(),
             },
         )
     }
@@ -215,4 +230,119 @@ impl Signal {
     pub fn _max(&self) -> f64 {
         self.max
     }
+}
+
+impl Discharge {
+    pub fn new(id: String, class: DisruptionClass, signals: Vec<Signal>) -> Discharge {
+        Discharge {
+            id,
+            class,
+            signals,
+        }
+    }
+}
+
+pub fn get_dataset(discharges: Vec<Discharge>) -> Dataset<f64, bool, Ix1> {
+    // Process each discharge separately and combine the results
+    let mut all_records = Vec::new();
+    let mut all_targets = Vec::new();
+    
+    for discharge in &discharges {
+        // Normalize signals for this discharge
+        let discharge_signals = discharge.signals.clone();
+        let normalized_signals = Signal::normalize_vec(discharge_signals);
+        
+        // Process signals by type for this discharge
+        let mut features_by_type: HashMap<SignalType, (Vec<f64>, Vec<f64>)> = HashMap::new();
+        let mut windows_count = 0;
+        
+        // Extract features from signals of this discharge
+        for signal in &normalized_signals {
+            let (mean_features, fft_features) = signal.get_features(WINDOW_SIZE);
+            let is_mean_features_empty = mean_features.values.is_empty();
+            let mean_features_len = mean_features.values.len();
+
+            // Store feature values by signal type
+            features_by_type.insert(
+                signal.signal_type.clone(),
+                (mean_features.values, fft_features.values)
+            );
+
+            // All signals in the same discharge should have the same window count
+            if windows_count == 0 && !is_mean_features_empty {
+                windows_count = mean_features_len;
+            }
+        }
+        
+        // Create records for this discharge
+        for window_idx in 0..windows_count {
+            let mut window_features = Vec::with_capacity(SignalType::count() * FeatureType::count());
+            let is_anomaly = discharge.class == DisruptionClass::Anomaly;
+            
+            // Collect features for all signal types in order
+            for signal_type in &[
+                SignalType::CorrientePlasma,
+                SignalType::ModeLock,
+                SignalType::Inductancia,
+                SignalType::Densidad,
+                SignalType::DerivadaEnergiaDiamagnetica,
+                SignalType::PotenciaRadiada,
+                SignalType::PotenciaDeEntrada,
+            ] {
+                // Add mean and fft_std values
+                if let Some((mean_values, _)) = features_by_type.get(signal_type) {
+                    if window_idx < mean_values.len() {
+                        window_features.push(mean_values[window_idx]);
+                        // We'll add FFT values later to keep them grouped
+                    } else {
+                        println!("Window index out of bounds for mean values");
+                        window_features.push(0.0);
+                    }
+                } else {
+                    println!("Signal type not found in features_by_type");
+                    window_features.push(0.0);
+                }
+            }
+            
+            // Now add all the FFT values in the same order
+            for signal_type in &[
+                SignalType::CorrientePlasma,
+                SignalType::ModeLock,
+                SignalType::Inductancia,
+                SignalType::Densidad,
+                SignalType::DerivadaEnergiaDiamagnetica,
+                SignalType::PotenciaRadiada,
+                SignalType::PotenciaDeEntrada,
+            ] {
+                if let Some((_, fft_values)) = features_by_type.get(signal_type) {
+                    if window_idx < fft_values.len() {
+                        window_features.push(fft_values[window_idx]);
+                    } else {
+                        window_features.push(0.0);
+                    }
+                } else {
+                    window_features.push(0.0);
+                }
+            }
+            
+            // Add this window's data to the combined results
+            all_records.push(window_features);
+            all_targets.push(is_anomaly);
+        }
+    }
+    
+    // Convert to ndarray structures
+    let records = Array2::from_shape_vec(
+        (all_records.len(), SignalType::count() * FeatureType::count()),
+        all_records.into_iter().flatten().collect()
+    ).unwrap();
+    
+    let targets = Array1::from_vec(all_targets);
+
+    log::info!("Dataset created with {} records and {} targets", records.shape()[0], targets.len());
+
+    let num_of_true = targets.iter().filter(|&&x| x == true).count();
+    log::info!("Number of true targets: {}", num_of_true);
+
+    Dataset::new(records, targets)
 }

@@ -167,7 +167,7 @@ impl Signal {
     /// Calcula las características de la señal en ventanas de tamaño `window_size`.
     /// Devuelve dos vectores con los valores medios y desviaciones estándar de la FFT.
     /// **Se asume que la señal ya está normalizada.**
-    pub fn get_features(&self, window_size: usize) -> (SignalFeatures, SignalFeatures) {
+    fn get_features(&self, window_size: usize) -> (SignalFeatures, SignalFeatures) {
         let num_windows = self.values.len() / window_size;
 
         // Vectores para almacenar resultados

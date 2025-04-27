@@ -8,7 +8,6 @@ use serde::Deserialize;
 const WINDOW_SIZE: usize = 16;
 
 pub struct Discharge {
-    pub id: String,
     pub class: DisruptionClass,
     pub signals: Vec<Signal>,
 }
@@ -28,6 +27,7 @@ pub struct Signal {
 pub enum DisruptionClass {
     Normal = 0,
     Anomaly = 1,
+    Unknown,
 }
 
 #[derive(Debug, Clone, Deserialize, Eq, Hash, PartialEq)]
@@ -235,8 +235,8 @@ impl Signal {
 }
 
 impl Discharge {
-    pub fn new(id: String, class: DisruptionClass, signals: Vec<Signal>) -> Discharge {
-        Discharge { id, class, signals }
+    pub fn new(class: DisruptionClass, signals: Vec<Signal>) -> Discharge {
+        Discharge { class, signals }
     }
 }
 

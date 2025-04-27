@@ -4,9 +4,9 @@ use actix_web::{App, HttpResponse, HttpServer, Responder, get, post, web};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use signals::get_dataset;
+use std::sync::RwLock;
 use std::time::Instant;
 use uuid::Uuid;
-use std::sync::{Arc, RwLock};
 
 use linfa::prelude::*;
 use linfa_svm::Svm;
@@ -183,9 +183,20 @@ fn api_discharge_to_internal_signals(discharge: &Discharge) -> Vec<InternalSigna
 }
 
 /// Procesa una petición de predicción
-fn process_prediction_request(_request: &PredictionRequest) -> PredictionResponse {
-    // Por ahora solo devolvemos una respuesta simulada
-    // En el futuro, aquí integraremos la lógica real de SVM
+fn process_prediction_request(
+    request: &PredictionRequest,
+    model: &Option<Svm<f64, bool>>,
+) -> PredictionResponse {
+    // Si no hay modelo entrenado, devolver respuesta por defecto
+    if model.is_none() {
+        return PredictionResponse {
+            prediction: -1,
+            confidence: 0.0,
+            execution_time_ms: 0.0,
+            model: "none".to_string(),
+            details: serde_json::json!({ "error": "No hay modelo entrenado" }),
+        };
+    }
 
     PredictionResponse {
         prediction: 1,
@@ -208,7 +219,6 @@ fn process_training_request(request: &TrainingRequest) -> (TrainingResponse, Svm
         .iter()
         .map(|d| {
             InternalDischarge::new(
-                d.id.clone(),
                 match d.anomaly_time {
                     Some(_) => DisruptionClass::Anomaly,
                     None => DisruptionClass::Normal,
@@ -258,8 +268,12 @@ fn process_training_request(request: &TrainingRequest) -> (TrainingResponse, Svm
 // API endpoints
 
 #[post("/predict")]
-async fn predict(req: web::Json<PredictionRequest>) -> impl Responder {
-    let response = process_prediction_request(&req);
+async fn predict(
+    req: web::Json<PredictionRequest>,
+    app_state: web::Data<AppState>,
+) -> impl Responder {
+    let model = app_state.model.read().unwrap();
+    let response = process_prediction_request(&req, &model);
     HttpResponse::Ok().json(response)
 }
 

@@ -184,7 +184,7 @@ fn process_prediction_request(_request: &PredictionRequest) -> PredictionRespons
 fn process_training_request(request: &TrainingRequest) -> TrainingResponse {
     // Convertir todas las descargas y señales al formato interno
     let start_time = Instant::now();
-    
+
     let discharges = request
         .discharges
         .iter()
@@ -199,18 +199,18 @@ fn process_training_request(request: &TrainingRequest) -> TrainingResponse {
         all_signals.extend(discharge.signals.clone());
     }
 
-    log::info!("Procesando {} señales para entrenamiento", all_signals.len());
-    
     let dataset = get_dataset(discharges);
     
-    let model = Svm::<f64, bool>::params()
+    let model: Svm<f64, bool> = Svm::<f64, bool>::params()
         .gaussian_kernel(10.)
         .pos_neg_weights(1.0, 1.0)
-        .eps(1e-3)
         .fit(&dataset)
         .expect("Error al entrenar el modelo SVM");
 
+    let nsupport = model.nsupport();    
     let execution_time_ms = start_time.elapsed().as_millis() as f64;
+
+    log::info!("Modelo entrenado con {} vectores de soporte en {} ms", nsupport, execution_time_ms);
     
     TrainingResponse {
         status: "success".to_string(),

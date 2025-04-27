@@ -27,7 +27,6 @@ pub struct Signal {
 pub enum DisruptionClass {
     Normal = 0,
     Anomaly = 1,
-    Unknown,
 }
 
 #[derive(Debug, Clone, Deserialize, Eq, Hash, PartialEq)]

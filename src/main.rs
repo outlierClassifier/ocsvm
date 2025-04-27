@@ -1,6 +1,6 @@
 mod signals;
 
-use actix_web::{get, post, web, App, HttpResponse, HttpServer, Responder};
+use actix_web::{App, HttpResponse, HttpServer, Responder, get, post, web};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use signals::get_dataset;
@@ -10,9 +10,9 @@ use uuid::Uuid;
 use linfa::prelude::*;
 use linfa_svm::Svm;
 
-use crate::signals::Signal as InternalSignal;
 use crate::signals::Discharge as InternalDischarge;
 use crate::signals::DisruptionClass;
+use crate::signals::Signal as InternalSignal;
 use crate::signals::SignalType;
 
 // Startup time for uptime calculation
@@ -119,7 +119,9 @@ fn get_discharge_type_from_file_name(file_name: &str) -> Result<SignalType, Stri
     if parts.len() < 3 {
         return Err(format!("Invalid file name format: {}", file_name));
     }
-    let signal_type_int = parts[2].parse::<i32>().map_err(|_| format!("Invalid signal type in file name: {}", file_name))?;
+    let signal_type_int = parts[2]
+        .parse::<i32>()
+        .map_err(|_| format!("Invalid signal type in file name: {}", file_name))?;
 
     let signal_type = match signal_type_int {
         1 => SignalType::CorrientePlasma,
@@ -132,16 +134,27 @@ fn get_discharge_type_from_file_name(file_name: &str) -> Result<SignalType, Stri
         _ => return Err(format!("Unknown signal type: {}", signal_type_int)),
     };
 
-    println!("Detected file name: {} with signal type: {:?}", file_name, signal_type);
+    println!(
+        "Detected file name: {} with signal type: {:?}",
+        file_name, signal_type
+    );
 
     Ok(signal_type)
 }
 
 /// Convierte un objeto Signal de la API a la estructura InternalSignal
-fn api_signal_to_internal(api_signal: &Signal, signal_class: DisruptionClass) -> Result<InternalSignal, String> {        
+fn api_signal_to_internal(
+    api_signal: &Signal,
+    signal_class: DisruptionClass,
+) -> Result<InternalSignal, String> {
     // Obtener el tipo de señal a partir del nombre del archivo
     let signal_type = get_discharge_type_from_file_name(&api_signal.file_name)?;
-    Ok(InternalSignal::new(api_signal.file_name.clone(), api_signal.values.clone(), signal_class, signal_type))
+    Ok(InternalSignal::new(
+        api_signal.file_name.clone(),
+        api_signal.values.clone(),
+        signal_class,
+        signal_type,
+    ))
 }
 
 /// Convierte una descarga completa de la API a un vector de señales internas. Descarta los ficheros con errores.
@@ -168,7 +181,7 @@ fn api_discharge_to_internal_signals(discharge: &Discharge) -> Vec<InternalSigna
 fn process_prediction_request(_request: &PredictionRequest) -> PredictionResponse {
     // Por ahora solo devolvemos una respuesta simulada
     // En el futuro, aquí integraremos la lógica real de SVM
-    
+
     PredictionResponse {
         prediction: 1,
         confidence: 0.95,
@@ -188,10 +201,16 @@ fn process_training_request(request: &TrainingRequest) -> TrainingResponse {
     let discharges = request
         .discharges
         .iter()
-        .map(|d| InternalDischarge::new(d.id.clone(), match d.anomaly_time {
-            Some(_) => DisruptionClass::Anomaly,
-            None => DisruptionClass::Normal,
-        }, api_discharge_to_internal_signals(d)))
+        .map(|d| {
+            InternalDischarge::new(
+                d.id.clone(),
+                match d.anomaly_time {
+                    Some(_) => DisruptionClass::Anomaly,
+                    None => DisruptionClass::Normal,
+                },
+                api_discharge_to_internal_signals(d),
+            )
+        })
         .collect::<Vec<_>>();
 
     let mut all_signals = Vec::new();
@@ -200,18 +219,22 @@ fn process_training_request(request: &TrainingRequest) -> TrainingResponse {
     }
 
     let dataset = get_dataset(discharges);
-    
+
     let model: Svm<f64, bool> = Svm::<f64, bool>::params()
         .gaussian_kernel(10.)
         .pos_neg_weights(1.0, 1.0)
         .fit(&dataset)
         .expect("Error al entrenar el modelo SVM");
 
-    let nsupport = model.nsupport();    
+    let nsupport = model.nsupport();
     let execution_time_ms = start_time.elapsed().as_millis() as f64;
 
-    log::info!("Modelo entrenado con {} vectores de soporte en {} ms", nsupport, execution_time_ms);
-    
+    log::info!(
+        "Modelo entrenado con {} vectores de soporte en {} ms",
+        nsupport,
+        execution_time_ms
+    );
+
     TrainingResponse {
         status: "success".to_string(),
         message: "Entrenamiento completado con éxito".to_string(),
@@ -249,10 +272,10 @@ async fn health_check() -> impl Responder {
             0.0
         }
     };
-    
+
     // Current date-time in ISO format
     let now: DateTime<Utc> = Utc::now();
-    
+
     let response = HealthCheckResponse {
         status: "online".to_string(),
         version: "1.0.0".to_string(),
@@ -264,7 +287,7 @@ async fn health_check() -> impl Responder {
         load: 0.3,
         last_training: now.to_rfc3339(),
     };
-    
+
     HttpResponse::Ok().json(response)
 }
 
@@ -272,14 +295,14 @@ async fn health_check() -> impl Responder {
 async fn main() -> std::io::Result<()> {
     // Initialize logger
     env_logger::init_from_env(env_logger::Env::default().default_filter_or("info"));
-    
+
     // Record start time for uptime calculations
     unsafe {
         START_TIME = Some(Instant::now());
     }
-    
+
     log::info!("Starting SVM model server on http://0.0.0.0:8001");
-    
+
     // Start the HTTP server
     HttpServer::new(|| {
         App::new()

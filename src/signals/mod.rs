@@ -2,7 +2,7 @@ use std::{collections::HashMap, hash::Hash};
 
 use linfa::Dataset;
 use ndarray::{Array1, Array2, Ix1};
-use rustfft::{num_complex::Complex, FftPlanner};
+use rustfft::{FftPlanner, num_complex::Complex};
 use serde::Deserialize;
 
 const WINDOW_SIZE: usize = 16;
@@ -88,7 +88,12 @@ impl std::fmt::Debug for SignalFeatures {
 }
 
 impl Signal {
-    pub fn new(label: String, values: Vec<f64>, class: DisruptionClass, signal_type: SignalType) -> Signal {
+    pub fn new(
+        label: String,
+        values: Vec<f64>,
+        class: DisruptionClass,
+        signal_type: SignalType,
+    ) -> Signal {
         let min = values.iter().fold(f64::MAX, |a, b| a.min(*b));
         let max = values.iter().fold(f64::MIN, |a, b| a.max(*b));
         Signal {
@@ -121,27 +126,30 @@ impl Signal {
         let mut max_by_type: HashMap<SignalType, f64> = HashMap::new();
 
         for signal in &signals {
-            let min_entry = min_by_type.entry(signal.signal_type.clone()).or_insert(f64::MAX);
+            let min_entry = min_by_type
+                .entry(signal.signal_type.clone())
+                .or_insert(f64::MAX);
             *min_entry = min_entry.min(signal.min);
-            
-            let max_entry = max_by_type.entry(signal.signal_type.clone()).or_insert(f64::MIN);
+
+            let max_entry = max_by_type
+                .entry(signal.signal_type.clone())
+                .or_insert(f64::MIN);
             *max_entry = max_entry.max(signal.max);
         }
-
 
         for signal in signals {
             let global_min = min_by_type.get(&signal.signal_type).unwrap();
             let global_max = max_by_type.get(&signal.signal_type).unwrap();
-            
+
             let mut values_norm = Vec::new();
             for value in signal.values {
                 let value_norm = (value - global_min) / (global_max - global_min);
                 values_norm.push(value_norm);
             }
-            
+
             let local_min = values_norm.iter().fold(f64::MAX, |a, b| a.min(*b));
             let local_max = values_norm.iter().fold(f64::MIN, |a, b| a.max(*b));
-            
+
             signals_norm.push(Signal {
                 label: signal.label,
                 _times: signal._times,
@@ -228,11 +236,7 @@ impl Signal {
 
 impl Discharge {
     pub fn new(id: String, class: DisruptionClass, signals: Vec<Signal>) -> Discharge {
-        Discharge {
-            id,
-            class,
-            signals,
-        }
+        Discharge { id, class, signals }
     }
 }
 
@@ -240,16 +244,16 @@ pub fn get_dataset(discharges: Vec<Discharge>) -> Dataset<f64, bool, Ix1> {
     // Process each discharge separately and combine the results
     let mut all_records = Vec::new();
     let mut all_targets = Vec::new();
-    
+
     for discharge in &discharges {
         // Normalize signals for this discharge
         let discharge_signals = discharge.signals.clone();
         let normalized_signals = Signal::normalize_vec(discharge_signals);
-        
+
         // Process signals by type for this discharge
         let mut features_by_type: HashMap<SignalType, (Vec<f64>, Vec<f64>)> = HashMap::new();
         let mut windows_count = 0;
-        
+
         // Extract features from signals of this discharge
         for signal in &normalized_signals {
             let (mean_features, fft_features) = signal.get_features(WINDOW_SIZE);
@@ -259,7 +263,7 @@ pub fn get_dataset(discharges: Vec<Discharge>) -> Dataset<f64, bool, Ix1> {
             // Store feature values by signal type
             features_by_type.insert(
                 signal.signal_type.clone(),
-                (mean_features.values, fft_features.values)
+                (mean_features.values, fft_features.values),
             );
 
             // All signals in the same discharge should have the same window count
@@ -267,12 +271,13 @@ pub fn get_dataset(discharges: Vec<Discharge>) -> Dataset<f64, bool, Ix1> {
                 windows_count = mean_features_len;
             }
         }
-        
+
         // Create records for this discharge
         for window_idx in 0..windows_count {
-            let mut window_features = Vec::with_capacity(SignalType::count() * FeatureType::count());
+            let mut window_features =
+                Vec::with_capacity(SignalType::count() * FeatureType::count());
             let is_anomaly = discharge.class == DisruptionClass::Anomaly;
-            
+
             // Collect features for all signal types in order
             for signal_type in &[
                 SignalType::CorrientePlasma,
@@ -297,7 +302,7 @@ pub fn get_dataset(discharges: Vec<Discharge>) -> Dataset<f64, bool, Ix1> {
                     window_features.push(0.0);
                 }
             }
-            
+
             // Now add all the FFT values in the same order
             for signal_type in &[
                 SignalType::CorrientePlasma,
@@ -318,22 +323,30 @@ pub fn get_dataset(discharges: Vec<Discharge>) -> Dataset<f64, bool, Ix1> {
                     window_features.push(0.0);
                 }
             }
-            
+
             // Add this window's data to the combined results
             all_records.push(window_features);
             all_targets.push(is_anomaly);
         }
     }
-    
+
     // Convert to ndarray structures
     let records = Array2::from_shape_vec(
-        (all_records.len(), SignalType::count() * FeatureType::count()),
-        all_records.into_iter().flatten().collect()
-    ).unwrap();
-    
+        (
+            all_records.len(),
+            SignalType::count() * FeatureType::count(),
+        ),
+        all_records.into_iter().flatten().collect(),
+    )
+    .unwrap();
+
     let targets = Array1::from_vec(all_targets);
 
-    log::info!("Dataset created with {} records and {} targets", records.shape()[0], targets.len());
+    log::info!(
+        "Dataset created with {} records and {} targets",
+        records.shape()[0],
+        targets.len()
+    );
 
     let num_of_true = targets.iter().filter(|&&x| x == true).count();
     log::info!("Number of true targets: {}", num_of_true);

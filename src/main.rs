@@ -201,17 +201,6 @@ fn process_training_request(request: &TrainingRequest) -> TrainingResponse {
 
     log::info!("Procesando {} señales para entrenamiento", all_signals.len());
     
-    // Normalizar las señales
-    let normalized_signals = InternalSignal::normalize_vec(all_signals);
-    
-
-    // Clasificación por ventana y fusión de predicciones
-    // Entrenar el SVM de Linfa para clasificar cada ventana individualmente.
-    // Para cada descarga se obtienen 200–700 predicciones binarias. Se determina la etiqueta final por mayoría de votos, proporción umbral o promedio de probabilidades 
-    // Construye un Dataset con todas las ventanas de todas las descargas:
-    // records: Array2<f64> de forma (Σ n_ventanas, 14).
-    // targets: Array1<usize> paralelo con la etiqueta de la descarga para cada ventana. (0 para no disruptiva, 1 para disructiva).
-
     let dataset = get_dataset(discharges);
     
     let model = Svm::<f64, bool>::params()

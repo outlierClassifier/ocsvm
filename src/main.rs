@@ -1,10 +1,27 @@
-use actix_web::{get, post, web, App, HttpResponse, HttpServer, Responder};
+mod signals;
+
+use actix_web::{App, HttpResponse, HttpServer, Responder, get, post, web};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::time::{Duration, Instant};
+use signals::get_dataset;
+use std::sync::RwLock;
+use std::time::Instant;
 use uuid::Uuid;
 
+use linfa::prelude::*;
+use linfa_svm::Svm;
+
+use crate::signals::Discharge as InternalDischarge;
+use crate::signals::DisruptionClass;
+use crate::signals::Signal as InternalSignal;
+use crate::signals::SignalType;
+
+// Startup time for uptime calculation
 static mut START_TIME: Option<Instant> = None;
+
+struct AppState {
+    model: RwLock<Option<Svm<f64, bool>>>,
+}
 
 // Data structures based on API schema
 
@@ -14,18 +31,18 @@ struct Signal {
     file_name: String,
     values: Vec<f64>,
     #[serde(default)]
-    times: Vec<f64>,
+    _times: Vec<f64>,
     #[serde(default)]
-    length: usize,
+    _length: usize,
 }
 
 #[derive(Deserialize)]
 struct Discharge {
     id: String,
     #[serde(default)]
-    times: Vec<f64>,
+    _times: Vec<f64>,
     #[serde(default)]
-    length: usize,
+    _length: usize,
     #[serde(default, rename = "anomalyTime")]
     anomaly_time: Option<f64>,
     signals: Vec<Signal>,
@@ -49,18 +66,18 @@ struct PredictionResponse {
 #[derive(Deserialize)]
 struct TrainingOptions {
     #[serde(default)]
-    epochs: Option<i32>,
+    _epochs: Option<i32>,
     #[serde(default, rename = "batchSize")]
-    batch_size: Option<i32>,
+    _batch_size: Option<i32>,
     #[serde(default)]
-    hyperparameters: Option<serde_json::Value>,
+    _hyperparameters: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
 struct TrainingRequest {
     discharges: Vec<Discharge>,
     #[serde(default)]
-    options: Option<TrainingOptions>,
+    _options: Option<TrainingOptions>,
 }
 
 #[derive(Serialize)]
@@ -99,27 +116,162 @@ struct HealthCheckResponse {
     last_training: String,
 }
 
-// API endpoints
+// Adaptadores para convertir entre modelos de API y estructuras internas
+fn get_discharge_type_from_file_name(file_name: &str) -> Result<SignalType, String> {
+    // File name pattern: "DES_<discharge_id>_<signal_type>_r2_sliding.txt"
 
-#[post("/predict")]
-async fn predict(_req: web::Json<PredictionRequest>) -> impl Responder {
-    // Simple mock response as requested (no actual SVM logic)
-    let response = PredictionResponse {
-        prediction: 1,
-        confidence: 0.95,
-        execution_time_ms: 123.0,
-        model: "svm".to_string(),
-        details: serde_json::json!({
-            "featureImportance": [0.3, 0.2, 0.5]
-        }),
+    let parts: Vec<&str> = file_name.split('_').collect();
+    if parts.len() < 3 {
+        return Err(format!("Invalid file name format: {}", file_name));
+    }
+    let signal_type_int = parts[2]
+        .parse::<i32>()
+        .map_err(|_| format!("Invalid signal type in file name: {}", file_name))?;
+
+    let signal_type = match signal_type_int {
+        1 => SignalType::CorrientePlasma,
+        2 => SignalType::ModeLock,
+        3 => SignalType::Inductancia,
+        4 => SignalType::Densidad,
+        5 => SignalType::DerivadaEnergiaDiamagnetica,
+        6 => SignalType::PotenciaRadiada,
+        7 => SignalType::PotenciaDeEntrada,
+        _ => return Err(format!("Unknown signal type: {}", signal_type_int)),
     };
-    
-    HttpResponse::Ok().json(response)
+
+    println!(
+        "Detected file name: {} with signal type: {:?}",
+        file_name, signal_type
+    );
+
+    Ok(signal_type)
 }
 
-#[post("/train")]
-async fn train(_req: web::Json<TrainingRequest>) -> impl Responder {
-    // Simple mock response as requested (no actual training logic)
+/// Convierte un objeto Signal de la API a la estructura InternalSignal
+fn api_signal_to_internal(
+    api_signal: &Signal,
+    signal_class: DisruptionClass,
+) -> Result<InternalSignal, String> {
+    // Obtener el tipo de señal a partir del nombre del archivo
+    let signal_type = get_discharge_type_from_file_name(&api_signal.file_name)?;
+    Ok(InternalSignal::new(
+        api_signal.file_name.clone(),
+        api_signal.values.clone(),
+        signal_class,
+        signal_type,
+    ))
+}
+
+/// Convierte una descarga completa de la API a un vector de señales internas. Descarta los ficheros con errores.
+fn api_discharge_to_internal_signals(discharge: &Discharge) -> Vec<InternalSignal> {
+    let signal_class = match discharge.anomaly_time {
+        Some(_) => DisruptionClass::Anomaly,
+        None => DisruptionClass::Normal,
+    };
+    discharge
+        .signals
+        .iter()
+        .map(|signal| api_signal_to_internal(signal, signal_class.clone()))
+        .filter_map(|result| match result {
+            Ok(signal) => Some(signal),
+            Err(err) => {
+                log::error!("Error converting signal: {}. Skipping this signal", err);
+                None
+            }
+        })
+        .collect()
+}
+
+/// Procesa una petición de predicción
+fn process_prediction_request(
+    request: &PredictionRequest,
+    model: &Option<Svm<f64, bool>>,
+) -> PredictionResponse {
+    let start_time = Instant::now();
+    
+    // Si no hay modelo entrenado, devolver respuesta por defecto
+    if model.is_none() {
+        return PredictionResponse {
+            prediction: -1,
+            confidence: 0.0,
+            execution_time_ms: 0.0,
+            model: "none".to_string(),
+            details: serde_json::json!({ "error": "No hay modelo entrenado" }),
+        };
+    }
+
+    let discharges = request.discharges.iter().map(|d| {
+        InternalDischarge::new(
+            DisruptionClass::Unknown, // La clase es desconocida en predicción
+            api_discharge_to_internal_signals(d),
+        )
+    }).collect::<Vec<_>>();
+    
+    let dataset = get_dataset(discharges);
+    
+    // Realizar predicción con el modelo
+    let predictions = model.as_ref().unwrap()
+        .predict(&dataset);
+    
+    // Determinar si hay anomalía (true representa anomalía)
+    let anomaly_count = predictions.iter().filter(|&&p| p).count();
+    let total = predictions.len();
+    let confidence = if total > 0 { anomaly_count as f64 / total as f64 } else { 0.0 };
+    
+    let prediction = if confidence > 0.5 { 1 } else { 0 };
+    
+    PredictionResponse {
+        prediction,
+        confidence,
+        execution_time_ms: start_time.elapsed().as_millis() as f64,
+        model: "svm".to_string(),
+        details: serde_json::json!({
+            "anomalyRatio": confidence
+        }),
+    }
+}
+
+/// Procesa una petición de entrenamiento
+fn process_training_request(request: &TrainingRequest) -> (TrainingResponse, Svm<f64, bool>) {
+    // Convertir todas las descargas y señales al formato interno
+    let start_time = Instant::now();
+
+    let discharges = request
+        .discharges
+        .iter()
+        .map(|d| {
+            InternalDischarge::new(
+                match d.anomaly_time {
+                    Some(_) => DisruptionClass::Anomaly,
+                    None => DisruptionClass::Normal,
+                },
+                api_discharge_to_internal_signals(d),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let mut all_signals = Vec::new();
+    for discharge in &discharges {
+        all_signals.extend(discharge.signals.clone());
+    }
+
+    let dataset = get_dataset(discharges);
+
+    let model: Svm<f64, bool> = Svm::<f64, bool>::params()
+        .gaussian_kernel(10.)
+        .pos_neg_weights(1.0, 1.0)
+        .fit(&dataset)
+        .expect("Error al entrenar el modelo SVM");
+
+    let nsupport = model.nsupport();
+    let execution_time_ms = start_time.elapsed().as_millis() as f64;
+
+    log::info!(
+        "Modelo entrenado con {} vectores de soporte en {} ms",
+        nsupport,
+        execution_time_ms
+    );
+
     let response = TrainingResponse {
         status: "success".to_string(),
         message: "Entrenamiento completado con éxito".to_string(),
@@ -129,9 +281,32 @@ async fn train(_req: web::Json<TrainingRequest>) -> impl Responder {
             loss: 0.12,
             f1_score: 0.94,
         },
-        execution_time_ms: 15000.0,
+        execution_time_ms,
     };
-    
+
+    (response, model)
+}
+
+// API endpoints
+
+#[post("/predict")]
+async fn predict(
+    req: web::Json<PredictionRequest>,
+    app_state: web::Data<AppState>,
+) -> impl Responder {
+    let model = app_state.model.read().unwrap();
+    let response = process_prediction_request(&req, &model);
+    HttpResponse::Ok().json(response)
+}
+
+#[post("/train")]
+async fn train(req: web::Json<TrainingRequest>, app_state: web::Data<AppState>) -> impl Responder {
+    println!("Received training petition");
+    let (response, model) = process_training_request(&req);
+
+    let mut model_lock = app_state.model.write().unwrap();
+    *model_lock = Some(model);
+
     HttpResponse::Ok().json(response)
 }
 
@@ -145,10 +320,12 @@ async fn health_check() -> impl Responder {
             0.0
         }
     };
-    
+
+    println!("Received heartbeat at {uptime}");
+
     // Current date-time in ISO format
     let now: DateTime<Utc> = Utc::now();
-    
+
     let response = HealthCheckResponse {
         status: "online".to_string(),
         version: "1.0.0".to_string(),
@@ -160,7 +337,7 @@ async fn health_check() -> impl Responder {
         load: 0.3,
         last_training: now.to_rfc3339(),
     };
-    
+
     HttpResponse::Ok().json(response)
 }
 
@@ -168,20 +345,56 @@ async fn health_check() -> impl Responder {
 async fn main() -> std::io::Result<()> {
     // Initialize logger
     env_logger::init_from_env(env_logger::Env::default().default_filter_or("info"));
-    
+
     // Record start time for uptime calculations
     unsafe {
         START_TIME = Some(Instant::now());
     }
-    
+
+    let app_state = web::Data::new(AppState {
+        model: RwLock::new(None),
+    });
+
+    // Configurar tamaño máximo de payload (10 MB)
+    let json_config = web::JsonConfig::default()
+        .limit(1 << 26)  // Tamaño max de 2^26 bytes (64 MB)
+        .error_handler(|err, _req| {
+            log::error!("JSON payload error: {}", err);
+            actix_web::error::InternalError::from_response(
+                err, 
+                HttpResponse::BadRequest()
+                    .json(serde_json::json!({"error": "Payload too large or malformed"}))
+            ).into()
+        });
+
     log::info!("Starting SVM model server on http://0.0.0.0:8001");
-    
-    // Start the HTTP server
-    HttpServer::new(|| {
+    log::info!("Health check server on http://0.0.0.0:3001");
+
+
+    // Start the health check server in a separate thread
+    std::thread::spawn(|| {
+        // Use the system runtime for the health check server
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            HttpServer::new(|| {
+                App::new().service(health_check)
+            })
+            .workers(1) // Use only one worker for health checks
+            .bind(("0.0.0.0", 3001))
+            .unwrap()
+            .run()
+            .await
+            .unwrap();
+        });
+    });
+
+    // Main application server
+    HttpServer::new(move || {
         App::new()
+            .app_data(app_state.clone())
+            .app_data(json_config.clone())  // Aplicar configuración de tamaño JSON
             .service(predict)
             .service(train)
-            .service(health_check)
     })
     .bind(("0.0.0.0", 8001))?
     .run()

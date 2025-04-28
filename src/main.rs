@@ -301,6 +301,7 @@ async fn predict(
 
 #[post("/train")]
 async fn train(req: web::Json<TrainingRequest>, app_state: web::Data<AppState>) -> impl Responder {
+    println!("Received training petition");
     let (response, model) = process_training_request(&req);
 
     let mut model_lock = app_state.model.write().unwrap();
@@ -319,6 +320,8 @@ async fn health_check() -> impl Responder {
             0.0
         }
     };
+
+    println!("Received heartbeat at {uptime}");
 
     // Current date-time in ISO format
     let now: DateTime<Utc> = Utc::now();
@@ -352,15 +355,46 @@ async fn main() -> std::io::Result<()> {
         model: RwLock::new(None),
     });
 
-    log::info!("Starting SVM model server on http://0.0.0.0:8001");
+    // Configurar tamaño máximo de payload (10 MB)
+    let json_config = web::JsonConfig::default()
+        .limit(1 << 26)  // Tamaño max de 2^26 bytes (64 MB)
+        .error_handler(|err, _req| {
+            log::error!("JSON payload error: {}", err);
+            actix_web::error::InternalError::from_response(
+                err, 
+                HttpResponse::BadRequest()
+                    .json(serde_json::json!({"error": "Payload too large or malformed"}))
+            ).into()
+        });
 
-    // Start the HTTP server
+    log::info!("Starting SVM model server on http://0.0.0.0:8001");
+    log::info!("Health check server on http://0.0.0.0:3001");
+
+
+    // Start the health check server in a separate thread
+    std::thread::spawn(|| {
+        // Use the system runtime for the health check server
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            HttpServer::new(|| {
+                App::new().service(health_check)
+            })
+            .workers(1) // Use only one worker for health checks
+            .bind(("0.0.0.0", 3001))
+            .unwrap()
+            .run()
+            .await
+            .unwrap();
+        });
+    });
+
+    // Main application server
     HttpServer::new(move || {
         App::new()
             .app_data(app_state.clone())
+            .app_data(json_config.clone())  // Aplicar configuración de tamaño JSON
             .service(predict)
             .service(train)
-            .service(health_check)
     })
     .bind(("0.0.0.0", 8001))?
     .run()

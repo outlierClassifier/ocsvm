@@ -187,6 +187,8 @@ fn process_prediction_request(
     request: &PredictionRequest,
     model: &Option<Svm<f64, bool>>,
 ) -> PredictionResponse {
+    let start_time = Instant::now();
+    
     // Si no hay modelo entrenado, devolver respuesta por defecto
     if model.is_none() {
         return PredictionResponse {
@@ -198,13 +200,33 @@ fn process_prediction_request(
         };
     }
 
+    let discharges = request.discharges.iter().map(|d| {
+        InternalDischarge::new(
+            DisruptionClass::Unknown, // La clase es desconocida en predicción
+            api_discharge_to_internal_signals(d),
+        )
+    }).collect::<Vec<_>>();
+    
+    let dataset = get_dataset(discharges);
+    
+    // Realizar predicción con el modelo
+    let predictions = model.as_ref().unwrap()
+        .predict(&dataset);
+    
+    // Determinar si hay anomalía (true representa anomalía)
+    let anomaly_count = predictions.iter().filter(|&&p| p).count();
+    let total = predictions.len();
+    let confidence = if total > 0 { anomaly_count as f64 / total as f64 } else { 0.0 };
+    
+    let prediction = if confidence > 0.5 { 1 } else { 0 };
+    
     PredictionResponse {
-        prediction: 1,
-        confidence: 0.95,
-        execution_time_ms: 123.0,
+        prediction,
+        confidence,
+        execution_time_ms: start_time.elapsed().as_millis() as f64,
         model: "svm".to_string(),
         details: serde_json::json!({
-            "featureImportance": [0.3, 0.2, 0.5]
+            "anomalyRatio": confidence
         }),
     }
 }

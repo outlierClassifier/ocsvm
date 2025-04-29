@@ -355,7 +355,6 @@ async fn main() -> std::io::Result<()> {
         model: RwLock::new(None),
     });
 
-    // Configurar tamaño máximo de payload (10 MB)
     let json_config = web::JsonConfig::default()
         .limit(1 << 26)  // Tamaño max de 2^26 bytes (64 MB)
         .error_handler(|err, _req| {

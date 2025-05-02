@@ -19,3 +19,6 @@ target/
 # Added by cargo
 
 /target
+
+# Program specific
+trained_svm_model.json

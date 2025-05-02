@@ -18,9 +18,34 @@ use crate::signals::SignalType;
 
 // Startup time for uptime calculation
 static mut START_TIME: Option<Instant> = None;
+const MODEL_PATH: &str = "trained_svm_model.json";
 
 struct AppState {
     model: RwLock<Option<Svm<f64, bool>>>,
+}
+
+impl AppState {
+    fn save_model_json(&self, path: &str) -> anyhow::Result<()> {
+        let model = self.model.read().unwrap();
+        if let Some(model) = &*model {
+            let json = serde_json::to_string(model)?;
+            std::fs::write(path, json).map_err(|e| anyhow::anyhow!("Failed to save model: {}", e))?;
+        } else {
+            return Err(anyhow::anyhow!("No model to save"));
+        }
+
+        log::info!("Model saved successfully to {}", path);
+
+        Ok(())
+    }
+
+    fn load_model_json(&self, path: &str) -> anyhow::Result<()> {
+        let model_data = std::fs::read_to_string(path)?;
+        let model: Svm<f64, bool> = serde_json::from_str(&model_data)?;
+        *self.model.write().unwrap() = Some(model);
+        log::info!("Model loaded successfully from {}", path);
+        Ok(())
+    }    
 }
 
 // Data structures based on API schema
@@ -304,8 +329,18 @@ async fn train(req: web::Json<TrainingRequest>, app_state: web::Data<AppState>) 
     println!("Received training petition");
     let (response, model) = process_training_request(&req);
 
-    let mut model_lock = app_state.model.write().unwrap();
-    *model_lock = Some(model);
+    {
+        let mut model_lock: std::sync::RwLockWriteGuard<'_, Option<Svm<f64, bool>>> = app_state.model.write().unwrap();
+        *model_lock = Some(model);
+    } // When model_lock goes out of scope, the lock is released
+
+    // Save the trained model to a file
+    let model_path = MODEL_PATH;
+    let res = app_state.save_model_json(model_path);
+    
+    if res.is_err() {
+        log::warn!("Unable to save model")
+    }
 
     HttpResponse::Ok().json(response)
 }
@@ -355,7 +390,13 @@ async fn main() -> std::io::Result<()> {
         model: RwLock::new(None),
     });
 
-    // Configurar tamaño máximo de payload (10 MB)
+    // Try to load model
+    let model_loaded = app_state.load_model_json(MODEL_PATH);
+    match model_loaded {
+        Ok(_) => log::info!("Model loaded from {}", MODEL_PATH),
+        Err(_) => log::info!("Model could not be loaded"),
+    }
+
     let json_config = web::JsonConfig::default()
         .limit(1 << 26)  // Tamaño max de 2^26 bytes (64 MB)
         .error_handler(|err, _req| {

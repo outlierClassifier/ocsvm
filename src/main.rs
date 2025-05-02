@@ -393,7 +393,7 @@ async fn main() -> std::io::Result<()> {
     // Try to load model
     let model_loaded = app_state.load_model_json(MODEL_PATH);
     match model_loaded {
-        Ok(_) => log::info!("Model loaded from {MODEL_PATH}"),
+        Ok(_) => log::info!("Model loaded from {}", MODEL_PATH),
         Err(_) => log::info!("Model could not be loaded"),
     }
 

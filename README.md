@@ -1,2 +1,2 @@
-# svm
-SVM classifier
+# OC-SVM
+OCSVM classifier

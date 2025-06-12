@@ -3,12 +3,13 @@ mod signals;
 use actix_web::{App, HttpResponse, HttpServer, Responder, get, post, web};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use signals::get_dataset;
+use signals::get_dataset_one_class;
 use std::sync::RwLock;
 use std::time::Instant;
 use uuid::Uuid;
 
 use linfa::prelude::*;
+use linfa::dataset::Pr;
 use linfa_svm::Svm;
 
 use crate::signals::Discharge as InternalDischarge;
@@ -232,11 +233,13 @@ fn process_prediction_request(
         )
     }).collect::<Vec<_>>();
     
-    let dataset = get_dataset(discharges);
-    
+    let dataset = get_dataset_one_class(discharges);
+
     // Realizar predicción con el modelo
-    let predictions = model.as_ref().unwrap()
-        .predict(&dataset);
+    let predictions = model
+        .as_ref()
+        .unwrap()
+        .predict(dataset.records());
     
     // Determinar si hay anomalía (true representa anomalía)
     let anomaly_count = predictions.iter().filter(|&&p| p).count();
@@ -264,12 +267,10 @@ fn process_training_request(request: &TrainingRequest) -> (TrainingResponse, Svm
     let discharges = request
         .discharges
         .iter()
+        .filter(|d| d.anomaly_time.is_none())
         .map(|d| {
             InternalDischarge::new(
-                match d.anomaly_time {
-                    Some(_) => DisruptionClass::Anomaly,
-                    None => DisruptionClass::Normal,
-                },
+                DisruptionClass::Normal,
                 api_discharge_to_internal_signals(d),
             )
         })
@@ -280,11 +281,11 @@ fn process_training_request(request: &TrainingRequest) -> (TrainingResponse, Svm
         all_signals.extend(discharge.signals.clone());
     }
 
-    let dataset = get_dataset(discharges);
+    let dataset = get_dataset_one_class(discharges);
 
-    let model: Svm<f64, bool> = Svm::<f64, bool>::params()
+    let model: Svm<f64, bool> = Svm::<f64, Pr>::params()
+        .nu_weight(0.1)
         .gaussian_kernel(10.)
-        .pos_neg_weights(1.0, 1.0)
         .fit(&dataset)
         .expect("Error al entrenar el modelo SVM");
 

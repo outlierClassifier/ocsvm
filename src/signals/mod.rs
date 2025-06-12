@@ -240,7 +240,8 @@ impl Discharge {
     }
 }
 
-pub fn get_dataset(discharges: Vec<Discharge>) -> Dataset<f64, bool, Ix1> {
+
+pub fn get_dataset_one_class(discharges: Vec<Discharge>) -> Dataset<f64, (), Ix1> {
     // Process each discharge separately and combine the results
     let mut all_records = Vec::new();
     let mut all_targets = Vec::new();
@@ -276,7 +277,6 @@ pub fn get_dataset(discharges: Vec<Discharge>) -> Dataset<f64, bool, Ix1> {
         for window_idx in 0..windows_count {
             let mut window_features =
                 Vec::with_capacity(SignalType::count() * FeatureType::count());
-            let is_anomaly = discharge.class == DisruptionClass::Anomaly;
 
             // Collect features for all signal types in order
             for signal_type in &[
@@ -326,7 +326,7 @@ pub fn get_dataset(discharges: Vec<Discharge>) -> Dataset<f64, bool, Ix1> {
 
             // Add this window's data to the combined results
             all_records.push(window_features);
-            all_targets.push(is_anomaly);
+            all_targets.push(());
         }
     }
 
@@ -347,9 +347,6 @@ pub fn get_dataset(discharges: Vec<Discharge>) -> Dataset<f64, bool, Ix1> {
         records.shape()[0],
         targets.len()
     );
-
-    let num_of_true = targets.iter().filter(|&&x| x == true).count();
-    log::info!("Number of true targets: {}", num_of_true);
 
     Dataset::new(records, targets)
 }

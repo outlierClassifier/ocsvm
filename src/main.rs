@@ -409,7 +409,7 @@ async fn main() -> std::io::Result<()> {
             ).into()
         });
 
-    log::info!("Starting SVM model server on http://0.0.0.0:8004");
+    log::info!("Starting OC-SVM model server on http://0.0.0.0:8004");
     log::info!("Health check server on http://0.0.0.0:3002");
 
 

@@ -409,8 +409,8 @@ async fn main() -> std::io::Result<()> {
             ).into()
         });
 
-    log::info!("Starting SVM model server on http://0.0.0.0:8001");
-    log::info!("Health check server on http://0.0.0.0:3001");
+    log::info!("Starting SVM model server on http://0.0.0.0:8004");
+    log::info!("Health check server on http://0.0.0.0:3002");
 
 
     // Start the health check server in a separate thread
@@ -422,7 +422,7 @@ async fn main() -> std::io::Result<()> {
                 App::new().service(health_check)
             })
             .workers(1) // Use only one worker for health checks
-            .bind(("0.0.0.0", 3001))
+            .bind(("0.0.0.0", 3002))
             .unwrap()
             .run()
             .await
@@ -438,7 +438,7 @@ async fn main() -> std::io::Result<()> {
             .service(predict)
             .service(train)
     })
-    .bind(("0.0.0.0", 8001))?
+    .bind(("0.0.0.0", 8004))?
     .run()
     .await
 }

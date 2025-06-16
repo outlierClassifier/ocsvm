@@ -1189,6 +1189,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "ocsvm"
+version = "0.1.0"
+dependencies = [
+ "actix-web",
+ "anyhow",
+ "bincode",
+ "chrono",
+ "env_logger",
+ "glob",
+ "linfa",
+ "linfa-svm",
+ "log",
+ "ndarray",
+ "rustfft",
+ "serde",
+ "serde_json",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "once_cell"
 version = "1.21.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1572,27 +1593,6 @@ name = "strength_reduce"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fe895eb47f22e2ddd4dabc02bce419d2e643c8e3b585c78158b349195bc24d82"
-
-[[package]]
-name = "svm"
-version = "0.1.0"
-dependencies = [
- "actix-web",
- "anyhow",
- "bincode",
- "chrono",
- "env_logger",
- "glob",
- "linfa",
- "linfa-svm",
- "log",
- "ndarray",
- "rustfft",
- "serde",
- "serde_json",
- "tokio",
- "uuid",
-]
 
 [[package]]
 name = "syn"
